@@ -51,6 +51,8 @@ def process_pdfs(pdf_storage_path: str):
         is_separator_regex=False,
     )
     docs = recursive_text_splitter.split_documents(documents)
+    if not docs:
+        raise ValueError("No documents found in the specified directory.")
 
     doc_search = Chroma.from_documents(docs, embeddings_model)
 
