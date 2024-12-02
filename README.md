@@ -1,3 +1,5 @@
+# 🤝 Give this repo a star if you use this template, please
+
 ---
 title: Example Chainlit Langchain RAG
 emoji: 🧩
