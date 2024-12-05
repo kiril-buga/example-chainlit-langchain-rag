@@ -1,26 +1,32 @@
 import os
+from operator import itemgetter
 from pathlib import Path
 from typing import List
 
 import chainlit as cl
 import chainlit.data as cl_data
+from chainlit.types import ThreadDict
 from langchain.callbacks.base import BaseCallbackHandler
 from langchain.indexes import SQLRecordManager, index
+from langchain.memory import ConversationBufferMemory
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema import Document
 from langchain.schema import StrOutputParser
-from langchain.schema.runnable import Runnable, RunnablePassthrough, RunnableConfig
+from langchain.schema.runnable import Runnable, RunnablePassthrough
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_community.document_loaders import (
     PyPDFDirectoryLoader,
 )
 from langchain_community.vectorstores import Chroma
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.prompts import MessagesPlaceholder
+from langchain_core.runnables import RunnableWithMessageHistory, RunnableLambda
 # from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 
 from feedback import CustomDataLayer
-from rag_bot import RagBot
 
 chunk_size = 1024
 chunk_overlap = 50
@@ -29,7 +35,6 @@ embeddings_model = HuggingFaceEndpointEmbeddings(
     huggingfacehub_api_token=os.getenv("HUGGINGFACEHUB_API_TOKEN"),
     model="sentence-transformers/all-MiniLM-L12-v2",
 )
-
 
 # Feedback
 cl_data._data_layer = CustomDataLayer()
@@ -91,6 +96,8 @@ model = ChatGroq(
 @cl.on_chat_start
 async def on_chat_start():
 
+def setup_runnable():
+    memory = cl.user_session.get("memory")  # type: ConversationBufferMemory
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system",
@@ -103,6 +110,7 @@ async def on_chat_start():
              \n\nRelevant documents will be retrieved below."""
              "Context: {context}"
              ),
+            MessagesPlaceholder(variable_name="history"),
             ("human", "{question}"),
         ]
     )
@@ -114,6 +122,9 @@ async def on_chat_start():
 
     runnable = (
             {"context": retriever | format_docs, "question": RunnablePassthrough()}
+            | RunnablePassthrough.assign(
+                history=RunnableLambda(memory.load_memory_variables) | itemgetter("history")
+            )
             | prompt
             | model
             | StrOutputParser()
@@ -121,11 +132,30 @@ async def on_chat_start():
 
     cl.user_session.set("runnable", runnable)
 
+@cl.on_chat_start
+async def on_chat_start():
+    cl.user_session.set("memory", ConversationBufferMemory(return_messages=True))
+    setup_runnable()
+
+@cl.on_chat_resume
+async def on_chat_resume(thread: ThreadDict):
+    memory = ConversationBufferMemory(return_messages=True)
+    root_messages = [m for m in thread["steps"] if m["parentId"] == None]
+    for message in root_messages:
+        if message["type"] == "user_message":
+            memory.chat_memory.add_user_message(message["output"])
+        else:
+            memory.chat_memory.add_ai_message(message["output"])
+
+    cl.user_session.set("memory", memory)
+
+    setup_runnable()
 
 @cl.on_message
 async def on_message(message: cl.Message):
+    memory = cl.user_session.get("memory")  # type: ConversationBufferMemory
     runnable = cl.user_session.get("runnable")  # type: Runnable
-    msg = cl.Message(content="")
+    response = cl.Message(content="")
 
     class PostMessageHandler(BaseCallbackHandler):
         """
@@ -178,11 +208,17 @@ async def on_message(message: cl.Message):
 
     async for chunk in runnable.astream(
             message.content,
-            config=RunnableConfig(callbacks=[
-                cl.LangchainCallbackHandler(),
-                PostMessageHandler(msg)
-            ]),
+            config={
+                "configurable": {"session_id": "foo"},
+                "callbacks": [
+                    cl.LangchainCallbackHandler(),
+                    PostMessageHandler(response)
+                ]
+            },
     ):
-        await msg.stream_token(chunk)
+        await response.stream_token(chunk)
 
-    await msg.send()
+    await response.send()
+
+    memory.chat_memory.add_user_message(message.content)
+    memory.chat_memory.add_ai_message(response.content)
