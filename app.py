@@ -92,10 +92,6 @@ model = ChatGroq(
     # other params...
 )
 
-
-@cl.on_chat_start
-async def on_chat_start():
-
 def setup_runnable():
     memory = cl.user_session.get("memory")  # type: ConversationBufferMemory
     prompt = ChatPromptTemplate.from_messages(
